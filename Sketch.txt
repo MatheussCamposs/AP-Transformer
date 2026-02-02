@@ -1,0 +1,189 @@
+SKETCH — Decoder-only Transformer (Arithmetic Progression) [C++]
+
+This is an initial version of the project and will be updated in the future.
+
+LEGEND
+  B       = batch size
+  L       = sequence length in TOKENS (after tokenization) used by the Transformer
+  N       = number of arithmetic progression terms in the context (before becoming tokens)
+  D       = fixed number of digits per term (left zero-padding)
+  d_model = embedding dimension / hidden size
+  V       = vocabulary size
+
+VOCABULARY
+  Tokens = {'0','1','2','3','4','5','6','7','8','9',' '}
+  V = 11
+
+  Note:
+    Numbers are represented using fixed-width left zero-padding.
+    Example: if D = 3, then 7 is encoded as "007".
+    This keeps the vocabulary small while still supporting large numbers and long sequences.
+
+TRANSFORMER FLOW
+
+0) Dataset generation
+  The dataset will be generated randomly. Sequences will have different lengths and
+  different common differences. After generation, each sequence is converted to a
+  string using left zero-padding and appended to a dataset file.
+
+  Initial dataset plan:
+    - ~10,000 sequences
+    - number of terms per sequence: 2 to 100
+    - common difference (delta): 1 to 500
+
+  Output format (example with D=3):
+    "007 010 013 016 019"
+
+  Files (C++):
+    - src/data/generate_ap.cpp
+    - src/data/converter.cpp
+    - data/dataset.txt
+
+-------------------------------------------------------------
+
+1) Tokenizer (character -> id)
+  Input:
+    - string s representing the sequence (digits and spaces only)
+  Output:
+    - integer ids in [0..10]
+
+  The tokenizer is only responsible for mapping characters to ids (and ids back to characters).
+  Suggested mapping:
+    '0'..'9' -> 0..9
+    ' '      -> 10
+
+  Files (C++):
+    - src/tokenizer/tokenizer.hpp
+    - src/tokenizer/tokenizer.cpp
+    - config/vocab.json   (or config/vocab.txt)
+
+-------------------------------------------------------------
+
+2) Embedding
+  Input:
+    - ids (B, L)
+  Output:
+    - X (B, L, d_model)
+
+  - Trainable table E (V, d_model)
+  - X = E[ids]
+
+  Note:
+    Embeddings are model parameters. If trainable, they should be saved in a model checkpoint.
+    The vocab file stores token<->id mappings (not embedding vectors).
+
+  Files (C++):
+    - src/layers/embedding.hpp
+    - src/layers/embedding.cpp
+
+-------------------------------------------------------------
+
+3) Positional encoding (sin/cos)
+  Input:
+    - X (B, L, d_model)
+  Output:
+    - X_pos (B, L, d_model)
+
+  - X_pos = X + PE(L, d_model)
+  - PE is deterministic (no learned parameters)
+
+  Files (C++):
+    - src/layers/positional_encoding.hpp
+    - src/layers/positional_encoding.cpp
+
+-------------------------------------------------------------
+
+4) TransformerBlock (single-head attention + LayerNorm + FFN)
+  Input:
+    - X (B, L, d_model)
+  Output:
+    - enriched X (B, L, d_model)
+
+  Recommendation:
+    Use PRE-LN for stability:
+      Z = LN(X)
+      Attention uses Z to compute Q/K/V
+
+  4.1) LayerNorm #1
+    Z = LN(X)
+
+  4.2) Masked single-head self-attention
+    Q = Z @ Wq
+    K = Z @ Wk
+    V = Z @ Wv
+
+    Where Wq, Wk, Wv are trainable.
+
+    Shapes:
+      d_k = d_model
+      Q, K, V -> (B, L, d_model)
+
+    Scores:
+      S = (Q @ K^T) / sqrt(d_k) -> (B, L, L)
+
+    Causal mask:
+      Block S[:, i, j] when j > i so the model cannot attend to future tokens.
+      In practice: add a large negative value before softmax.
+
+  4.3) Residual (optional but recommended)
+    X = X + AttentionOutput
+
+  4.4) LayerNorm #2
+    Z2 = LN(X)
+
+  4.5) FFN (Feed-Forward Network)
+    M = Linear(d_model -> d_ff)
+    M = ReLU(M)
+    M = Linear(d_ff -> d_model)
+
+    Result: M (B, L, d_model)
+
+  4.6) Residual (optional but recommended)
+    X = X + M
+
+  Files (C++):
+    - src/model/attention_single_head.hpp
+    - src/model/attention_single_head.cpp
+    - src/model/ffn.hpp
+    - src/model/ffn.cpp
+    - src/model/transformer_block.hpp
+    - src/model/transformer_block.cpp
+    - src/model/causal_mask.hpp
+    - src/model/causal_mask.cpp
+    - src/layers/linear.hpp
+    - src/layers/linear.cpp
+    - src/layers/layernorm.hpp
+    - src/layers/layernorm.cpp
+    - src/layers/activations.hpp
+    - src/layers/activations.cpp
+
+-------------------------------------------------------------
+
+5) Output projection (linear -> vocabulary)
+  Input:
+    - X (B, L, d_model)
+  Output:
+    - logits (B, L, V)
+
+  logits = X @ W_out + b
+  W_out (d_model, V), b (V)
+
+  Files (C++):
+    - src/model/output_head.hpp
+    - src/model/output_head.cpp
+
+-------------------------------------------------------------
+
+6) Training loss: Softmax + Cross-Entropy
+  Input:
+    - logits (B, L, V)
+    - targets y_ids (B, L)
+  Output:
+    - scalar loss
+
+  Recommendation:
+    Implement Softmax+CrossEntropy as a single module for numerical stability.
+
+  Files (C++):
+    - src/layers/softmax_ce.hpp
+    - src/layers/softmax_ce.cpp
